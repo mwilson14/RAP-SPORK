@@ -52,9 +52,13 @@ from kdpfoot_section import kdp_objects
 from zdr_col_section import zdrcol
 from rotation_stuff import get_rotation
 from rotation_matching_qc import rot_storm_matcher_qc
-from RAP_Archive import get_RAP_data
+from RAP_Archive import get_RAP_data, get_RAP_data_herbie
 from metpy.interpolate import interpolate_to_points
 import threading
+from skl2onnx import to_onnx
+from skl2onnx.common.data_types import FloatTensorType
+from skl2onnx import convert_sklearn
+import onnxruntime as rt
 
 def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z_trigger, storm_to_track, year, month, day, hour, start_min, duration, calibration, station, Bunkers_m, track_dis=10, GR_mins=5.0):
     #Set vector perpendicular to FFD Z gradient
@@ -121,9 +125,13 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
     f.write("Refresh: 8 \n \n")
 
     #Load ML algorithm
-    forest_loaded = pickle.load(open('NewData2022RandomForest.pkl', 'rb'))
-    forest_loaded_col = pickle.load(open('NewDataRandomForest_2022COLUMNS.pkl', 'rb'))
-    forest_loaded_mesos = pickle.load(open('NewDataRandomForest_MESOS.pkl', 'rb'))
+    #Reworking this to work with Onyx
+    forest_loaded = rt.InferenceSession("NewData2022RandomForest.onnx", providers=["CPUExecutionProvider"])
+    forest_loaded_col = rt.InferenceSession("NewDataRandomForest_2022COLUMNS.onnx", providers=["CPUExecutionProvider"])
+    forest_loaded_mesos = rt.InferenceSession("NewDataRandomForest_MESOS.onnx", providers=["CPUExecutionProvider"])
+    # forest_loaded = pickle.load(open('NewData2022RandomForest.pkl', 'rb'))
+    # forest_loaded_col = pickle.load(open('NewDataRandomForest_2022COLUMNS.pkl', 'rb'))
+    # forest_loaded_mesos = pickle.load(open('NewDataRandomForest_MESOS.pkl', 'rb'))
 
     #Actual algorithm code starts here
     #Create a list for the lists of arc outlines
@@ -201,8 +209,14 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
         #Get RAP data for FFD angles
             
         if f_l == 0:
-            ffd_lons, ffd_lats, ffd_Rangles, Z0C_arl1 = get_RAP_data(cenlon, cenlat, time_start)
-
+            # try:
+            #     ffd_lons, ffd_lats, ffd_Rangles, Z0C_arl1 = get_RAP_data(cenlon, cenlat, time_start)
+            #     print(np.mean(Z0C_arl1))
+            # except:
+            #     'THREDDS RAP unavailable, trying herbie'
+            ffd_lons, ffd_lats, ffd_Rangles, Z0C_arl1 = get_RAP_data_herbie(cenlon, cenlat, time_start)
+            print(np.mean(Z0C_arl1))
+        
             radar_z = radar.altitude['data']
             Z0C_arl = Z0C_arl1 - (radar_z*units('m'))
 
@@ -213,7 +227,7 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
             storm_relative_dir = ffd_sgrid
 
             Z0C_grid = interpolate_to_points(np.asarray([np.ndarray.flatten(ffd_lons), np.ndarray.flatten(ffd_lats)]).T,
-                              np.ndarray.flatten(Z0C_arl[0,:,:].magnitude),
+                              np.ndarray.flatten(Z0C_arl[:,:].magnitude),
                               np.asarray([np.ndarray.flatten(rlons_2d), np.ndarray.flatten(rlats_2d)]).T)
             Z0C_sgrid = Z0C_grid.reshape(rlons_2d.shape)
             ZINT_sgrid = np.round(Z0C_sgrid/250)
@@ -222,7 +236,10 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
         else:
             diff_seconds = (time_start-time_RAPscan).seconds
             if diff_seconds > 3600:
-                ffd_lons, ffd_lats, ffd_Rangles, Z0C_arl1 = get_RAP_data(cenlon, cenlat, time_start)
+                
+                ffd_lons, ffd_lats, ffd_Rangles, Z0C_arl1 = get_RAP_data_herbie(cenlon, cenlat, time_start)
+                print(np.mean(Z0C_arl1))
+            
 
                 radar_z = radar.altitude['data']
                 Z0C_arl = Z0C_arl1 - (radar_z*units('m'))
@@ -234,7 +251,7 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
                 storm_relative_dir = ffd_sgrid
 
                 Z0C_grid = interpolate_to_points(np.asarray([np.ndarray.flatten(ffd_lons), np.ndarray.flatten(ffd_lats)]).T,
-                              np.ndarray.flatten(Z0C_arl[0,:,:].magnitude),
+                              np.ndarray.flatten(Z0C_arl[:,:].magnitude),
                               np.asarray([np.ndarray.flatten(rlons_2d), np.ndarray.flatten(rlats_2d)]).T)
                 Z0C_sgrid = Z0C_grid.reshape(rlons_2d.shape)
                 ZINT_sgrid = np.round(Z0C_sgrid/250)
@@ -438,7 +455,7 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
         #Reflectivity smoothed for storm tracker
         smoothed_ref = ndi.gaussian_filter(REFmasked, sigma = 3, order = 0)
         #1st Z contour plotted
-        refc = ax.contour(rlons[0,:,:],rlats[0,:,:],smoothed_ref,REFlev, alpha=.01)
+        refc = ax.contour(rlons[0,:,:],rlats[0,:,:],smoothed_ref,REFlev, alpha=.5)
 
         #Set up projection for area calculations
         proj_old = partial(pyproj.transform, pyproj.Proj(init='epsg:4326'),
@@ -779,9 +796,11 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
                     rot1_con_mags.append(np.max(rot_magstorm1))
                     rot1_con_storm_lon.append(max_lons_c[i[0]])
                     rot1_con_storm_lat.append(max_lats_c[i[0]])
-                    rot1_con_lon.append(rot1_objects_lons[np.where(rot_magstorm1==np.max(rot_magstorm1))])
-                    rot1_con_lat.append(rot1_objects_lats[np.where(rot_magstorm1==np.max(rot_magstorm1))])
+                    rot1_con_lon.append(rot1_objects_lons[np.where(rot_magstorm1==np.max(rot_magstorm1))][0])
+                    rot1_con_lat.append(rot1_objects_lats[np.where(rot_magstorm1==np.max(rot_magstorm1))][0])
                     rot1_con_area.append(azarea1[np.where(rot_magstorm1==np.max(rot_magstorm1))])
+                    print(np.max(rot_magstorm1), 'rot max')
+                    print(rot1_objects_lons[np.where(rot_magstorm1==np.max(rot_magstorm1))], 'rot lon')
                 except:
                     rot1_con_mags.append(0)
                     rot1_con_storm_lon.append(0)
@@ -799,8 +818,8 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
                     rot15_con_mags.append(np.max(rot_magstorm15))
                     rot15_con_storm_lon.append(max_lons_c[i[0]])
                     rot15_con_storm_lat.append(max_lats_c[i[0]])
-                    rot15_con_lon.append(rot15_objects_lons[np.where(rot_magstorm15==np.max(rot_magstorm15))])
-                    rot15_con_lat.append(rot15_objects_lats[np.where(rot_magstorm15==np.max(rot_magstorm15))])
+                    rot15_con_lon.append(rot15_objects_lons[np.where(rot_magstorm15==np.max(rot_magstorm15))][0])
+                    rot15_con_lat.append(rot15_objects_lats[np.where(rot_magstorm15==np.max(rot_magstorm15))][0])
                     rot15_con_area.append(azarea15[np.where(rot_magstorm15==np.max(rot_magstorm15))])
                 except:
                     rot15_con_mags.append(0)
@@ -819,8 +838,8 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
                     rot2_con_mags.append(np.max(rot_magstorm2))
                     rot2_con_storm_lon.append(max_lons_c[i[0]])
                     rot2_con_storm_lat.append(max_lats_c[i[0]])
-                    rot2_con_lon.append(rot2_objects_lons[np.where(rot_magstorm2==np.max(rot_magstorm2))])
-                    rot2_con_lat.append(rot2_objects_lats[np.where(rot_magstorm2==np.max(rot_magstorm2))])
+                    rot2_con_lon.append(rot2_objects_lons[np.where(rot_magstorm2==np.max(rot_magstorm2))][0])
+                    rot2_con_lat.append(rot2_objects_lats[np.where(rot_magstorm2==np.max(rot_magstorm2))][0])
                     rot2_con_area.append(azarea2[np.where(rot_magstorm2==np.max(rot_magstorm2))])
                 except:
                     rot2_con_mags.append(0)
@@ -839,8 +858,8 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
                     rot25_con_mags.append(np.max(rot_magstorm25))
                     rot25_con_storm_lon.append(max_lons_c[i[0]])
                     rot25_con_storm_lat.append(max_lats_c[i[0]])
-                    rot25_con_lon.append(rot25_objects_lons[np.where(rot_magstorm25==np.max(rot_magstorm25))])
-                    rot25_con_lat.append(rot25_objects_lats[np.where(rot_magstorm25==np.max(rot_magstorm25))])
+                    rot25_con_lon.append(rot25_objects_lons[np.where(rot_magstorm25==np.max(rot_magstorm25))][0])
+                    rot25_con_lat.append(rot25_objects_lats[np.where(rot_magstorm25==np.max(rot_magstorm25))][0])
                     rot25_con_area.append(azarea25[np.where(rot_magstorm25==np.max(rot_magstorm25))])
                 except:
                     rot25_con_mags.append(0)
@@ -1104,10 +1123,15 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
                     p_col_vols.append((0))
                     
             #Now start plotting stuff!
+            # print(np.asarray(max_lons_c)[tracking_ind], 'max lons c')
+            # LL = (np.asarray(max_lons_c)[tracking_ind]-0.3,np.asarray(max_lats_c)[tracking_ind]-0.3,ccrs.PlateCarree())
+            # UR = (np.asarray(max_lons_c)[tracking_ind]+0.3,np.asarray(max_lats_c)[tracking_ind]+0.3,ccrs.PlateCarree())
+            # print(np.asarray(max_lons_c)[tracking_ind],LL,UR)
+            # ax.set_extent([LL[0],UR[0],LL[1],UR[1]])
             try:
-                LL = (max_lons_c[tracking_ind]-0.3,max_lats_c[tracking_ind]-0.3,ccrs.PlateCarree())
-                UR = (max_lons_c[tracking_ind]+0.3,max_lats_c[tracking_ind]+0.3,ccrs.PlateCarree())
-                ax.set_extent([LL[0],UR[0],LL[1],UR[1]])
+                LL = (max_lons_c[tracking_ind]-0.3,max_lats_c[tracking_ind]-0.3+0.2,ccrs.PlateCarree())
+                UR = (max_lons_c[tracking_ind]+0.3,max_lats_c[tracking_ind]+0.3+0.2,ccrs.PlateCarree())
+                ax.set_extent([LL[0][0],UR[0][0],LL[1][0],UR[1][0]])
             except:
                 print('storm not here yet')
             #Now start plotting stuff!
@@ -1127,13 +1151,13 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
             rot_7l = p_rot25a[tracking_ind]/493
             try:
                 if np.asarray(rot1_con_lon).shape[0] > 0:
-                    mm_1= ax.scatter(rot1_con_lon, rot1_con_lat, marker = 'v', s = 100, color = 'red', zorder = 20, transform=ccrs.PlateCarree(), label="1km meso: %.4f s$^-$$^1$" %(rot_1l))
+                    mm_1= ax.scatter(np.asarray(rot1_con_lon), np.asarray(rot1_con_lat), marker = 'v', s = 100, color = 'red', zorder = 20, transform=ccrs.PlateCarree(), label="1km meso: %.4f s$^-$$^1$" %(rot_1l))
                 if np.asarray(rot15_con_lon).shape[0] > 0:
-                    mm_3 = ax.scatter(rot15_con_lon, rot15_con_lat, marker = 'v', s = 100, color = 'orange', zorder = 20, transform=ccrs.PlateCarree(), label="3km meso: %.4f s$^-$$^1$" %(rot_3l))
+                    mm_3 = ax.scatter(np.asarray(rot15_con_lon), np.asarray(rot15_con_lat), marker = 'v', s = 100, color = 'orange', zorder = 20, transform=ccrs.PlateCarree(), label="3km meso: %.4f s$^-$$^1$" %(rot_3l))
                 if np.asarray(rot2_con_lon).shape[0] > 0:
-                    mm_5 = ax.scatter(rot2_con_lon, rot2_con_lat, marker = 'v', s = 100, color = 'yellow', zorder = 20, transform=ccrs.PlateCarree(), label="5km meso: %.4f s$^-$$^1$" %(rot_5l))
+                    mm_5 = ax.scatter(np.asarray(rot2_con_lon), np.asarray(rot2_con_lat), marker = 'v', s = 100, color = 'yellow', zorder = 20, transform=ccrs.PlateCarree(), label="5km meso: %.4f s$^-$$^1$" %(rot_5l))
                 if np.asarray(rot25_con_lon).shape[0] > 0:
-                    mm_7 = ax.scatter(rot25_con_lon, rot25_con_lat, marker = 'v', s = 100, color = 'green', zorder = 20, transform=ccrs.PlateCarree(), label="7km meso: %.4f s$^-$$^1$" %(rot_7l)) 
+                    mm_7 = ax.scatter(np.asarray(rot25_con_lon), np.asarray(rot25_con_lat), marker = 'v', s = 100, color = 'green', zorder = 20, transform=ccrs.PlateCarree(), label="7km meso: %.4f s$^-$$^1$" %(rot_7l)) 
             except:
                 print('rotation FAILED')
 #                if np.asarray(rot1_con_lon).shape[0] > 0:
@@ -1175,10 +1199,10 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
             p_zdr_mode = []
             p_zdr_median = []
             p_hail_areas = []
-            p_rot1 = []
-            p_rot15 = []
-            p_rot2 = []
-            p_rot25 = []
+            p_rot1a = []
+            p_rot15a = []
+            p_rot2a = []
+            p_rot25a = []
             p_rot1area = []
             p_rot15area = []
             p_rot2area = []
@@ -1246,10 +1270,13 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
             'times' : storm_times
         })
         new_cells.set_index(['scan', 'storm_id'], inplace=True)
+        print(new_cells, 'initial stupid pandas dataframe')
         if scan_index == 0:
             tracks_dataframe = new_cells
         else:
-            tracks_dataframe = tracks_dataframe.append(new_cells)
+            #tracks_dataframe = tracks_dataframe._append(new_cells)
+            tracks_dataframe=pd.concat([tracks_dataframe, new_cells])
+            print(tracks_dataframe, 'final stupid pandas dataframe')
         n = n+1
         scan_index = scan_index + 1
 
@@ -1288,10 +1315,10 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
         try:
             print(max_lons_c[tracking_ind], 'tracking lon')
             print(p_zdr_areas[tracking_ind], 'tracking ind areas')
-            legend_zdr = p_zdr_areas[tracking_ind]
-            legend_hail = p_hail_areas[tracking_ind]
-            legend_col = p_col_areas[tracking_ind]
-            legend_sep = o_sp_angle[tracking_ind]
+            legend_zdr = p_zdr_areas[tracking_ind][0]
+            legend_hail = p_hail_areas[tracking_ind][0]
+            legend_col = p_col_areas[tracking_ind][0]
+            legend_sep = o_sp_angle[tracking_ind][0]
         except:
             legend_zdr=0
             legend_hail=0
@@ -1324,11 +1351,11 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
         except:
             print('no spinny things')
         try:
-            plt.legend(handles=[zdr_outline, kdp_outline, hail_outline, column_outline, separation_vector, z_outline, mm_1, mm_3, mm_5, mm_7], loc = 3, fontsize = 25)
+            plt.legend(handles=[zdr_outline, kdp_outline, hail_outline, column_outline, separation_vector, z_outline], loc = 3, fontsize = 25)
         except:
             print('oops storm')
         alt_levs = [1000, 2000]
-        plt.savefig('Machine_Learning/SPORK_STAMP'+station+str(time_start.year)+str(time_start.month)+str(day)+str(hour)+str(minute)+'.png')
+        plt.savefig('Machine_Learning/NSPORK_STAMP'+station+str(time_start.year)+str(time_start.month)+str(day)+str(hour)+str(minute)+'.png')
         print('Figure Saved')
 
 #Get postage stamps for the CNN project
@@ -1407,6 +1434,7 @@ def multi_case_algorithm_2020(zdrlev, kdplev, REFlev, REFlev1, big_storm, zero_z
         print(p_rot15)
         print(p_rot2)
         print(p_rot25)
+        print(np.asarray(rot1_con_lon), 'rot lons')
         #print(rot_mag1, rot_lat1, rot_lon1, rot_storm_lon_1, rot_storm_lat_1)
         
         #print('consolidated', rot1_con_mags, rot1_con_lon, rot1_con_lat, rot1_con_lon, rot1_con_storm_lon, rot1_con_storm_lat)

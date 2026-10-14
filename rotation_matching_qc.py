@@ -8,6 +8,10 @@ import matplotlib.pyplot as plt
 from pyproj import Geod
 import csv
 from metpy.calc import wind_direction, wind_speed, wind_components
+from skl2onnx import to_onnx
+from skl2onnx.common.data_types import FloatTensorType
+from skl2onnx import convert_sklearn
+import onnxruntime as rt
 
 def rot_storm_matcher_qc(shear_maxes1,shear_lats1, shear_lons1,ax,f,time_start,month,d_beg,h_beg,min_beg,sec_beg,d_end,h_end,min_end,sec_end,rlons,rlats,max_lons_c,max_lats_c,proj, tracking_ind, rlons_2d, rlats_2d, REFall, KDPall, CCall, grad_ffd, grad_mag, ZDR_sum_stuff, az_masked, storm_relative_dir,station, dt, forest_loaded_meso, rot_lev):
     
@@ -139,9 +143,14 @@ def rot_storm_matcher_qc(shear_maxes1,shear_lats1, shear_lons1,ax,f,time_start,m
             MESO_X[:,12] = xc
             MESO_X[:,13] = yc
             MESO_X[np.isnan(MESO_X)]=-9999.0
-            pred_meso = forest_loaded_meso.predict(MESO_X)
+            #Update prediction to use Onyx
+            input_name = forest_loaded_meso.get_inputs()[0].name
+            label_name = forest_loaded_meso.get_outputs()[0].name
+            pred_meso = forest_loaded_meso.run([label_name], {input_name: MESO_X.astype(np.float32)})[0]
+            #pred_meso = forest_loaded_meso.predict(MESO_X)
 
             if pred_meso[0]==1:
+                print(shear_maxes1[i], shear_lons1[i], shear_lats1[i])
                 rot_mag2.append((shear_maxes1[i]))
                 az_area2.append((az_area))
                 rot_lon2.append((shear_lons1[i]))

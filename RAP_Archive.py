@@ -9,6 +9,10 @@ from datetime import datetime, timedelta
 import netCDF4
 from metpy.calc import wind_direction
 
+from herbie import Herbie
+import pandas as pd
+from geopy import distance
+
 def get_RAP_data(radar_lon, radar_lat, time_start):
     #This definition will grab RAP data from around a given radar site for the ZDR arc algorithm.
     #cat = TDSCatalog('https://www.ncei.noaa.gov/thredds/catalog/model-rap130anl-old/'+str(time_start.year)+str(month)+'/'+str(time_start.year)+str(month)+str(day)+'/catalog.html?dataset=rap130anl-old/'+str(time_start.year)+str(month)+'/'+str(time_start.year)+str(month)+str(day)+'/rap_130_'+str(time_start.year)+str(month)+str(day)+'_'+str(hour)+'00_000.grb2')
@@ -263,3 +267,74 @@ def get_RAP_data(radar_lon, radar_lat, time_start):
 
     
     return trlons, trlats, shr_dir, Z0C
+
+
+def get_RAP_data_herbie(radar_lon, radar_lat, time_start):
+    #This definition will grab RAP data from around a given radar site for the ZDR arc algorithm.
+    #This uses the herbie module, which should work for late 2020 onward.
+    print(radar_lon, radar_lat)
+    cenlon=radar_lon
+    cenlat=radar_lat
+    hour = time_start.hour
+    year = time_start.year
+    if hour < 10:
+        hour = '0'+str(hour)
+    day = time_start.day
+    if day < 10:
+        day = '0'+str(day)
+    month = time_start.month
+    if month < 10:
+        month = '0'+str(month)
+
+    fh=0
+
+    H = Herbie(str(year)+"-"+str(month)+"-"+str(day)+" "+str(hour)+":00", fxx=int(fh), model="rap", product="awp130pgrb")
+    print(fh)
+    #H.download()
+
+    dsUV400 = H.xarray(":[U\|V]GRD:400 mb")
+    dsUV10m = H.xarray(":[U\|V]GRD:10 m above ground")
+    dsZ0C = H.xarray(":HGT:0C isotherm")
+
+    Z0Ci = np.asarray(dsZ0C.variables['gh'])
+    U10 = np.asarray(dsUV10m.variables['u10'])
+    V10 = np.asarray(dsUV10m.variables['v10'])
+    U400 = np.asarray(dsUV400.variables['u'])
+    V400 = np.asarray(dsUV400.variables['v'])
+    
+    lons_r = np.asarray(dsZ0C.longitude)-360
+    lats_r = np.asarray(dsZ0C.latitude)
+
+    flon = float(cenlon)
+    flat = float(cenlat)
+    # Set up our array of latitude and longitude values and transform to 
+    # the desired projection.
+    crs = ccrs.PlateCarree()
+    crlons = lons_r
+    crlats = lats_r
+    # dlon1 = np.abs(crlons - cenlon)
+    # dlat1 = np.abs(crlats - cenlat)
+    cen_pt = (cenlat, cenlon)
+    dist_pt1 = np.copy(crlats)
+    dist_pt1[:,:] = 0
+    for a in range(crlats.shape[0]):
+        for b in range(crlats.shape[1]):
+            pt_1 = (crlats[a,b], crlons[a,b])
+            dist_pt1[a,b] = distance.distance(cen_pt, pt_1).kilometers
+    ilon = np.where(dist_pt1 == np.min(dist_pt1))
+
+    Z0C = Z0Ci[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31] * units('m')
+    u400 = U400[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31]
+    v400 = V400[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31]
+    u10m = U10[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31]
+    v10m = V10[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31]
+    trlons = crlons[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31]
+    trlats = crlats[ilon[0][0]-30:ilon[0][0]+31, ilon[1][0]-30:ilon[1][0]+31]
+
+    us400 = u400-u10m
+    vs400 = v400-v10m
+    shr_dir = wind_direction(us400*units('m/s'), vs400*units('m/s'))
+
+    return trlons, trlats, shr_dir, Z0C
+    
+    
